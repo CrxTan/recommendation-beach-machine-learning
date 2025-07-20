@@ -3,6 +3,7 @@ import json
 import numpy as np
 import tensorflow as tf
 import pickle
+import requests # Impor library requests
 from flask import Flask, request, jsonify
 from tensorflow.keras.preprocessing.text import Tokenizer
 from tensorflow.keras.preprocessing.sequence import pad_sequences
@@ -12,9 +13,7 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from flask_cors import CORS
 import pandas as pd
-import logging # Import the logging module
 import logging
-logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -28,20 +27,27 @@ BASE_DIR = os.path.dirname(__file__)
 
 # Sentiment Models Paths
 SENTIMENT_MODEL_PATH = os.path.join(BASE_DIR, 'Models', 'sentimen', 'sentiment_model_lstm.h5')
-SENTIMENT_TOKENIZER_PATH = os.path.join(BASE_DIR, 'Models', 'sentimen', 'tokenizer.pkl') # Tokenizer untuk sentiment
+SENTIMENT_TOKENIZER_PATH = os.path.join(BASE_DIR, 'Models', 'sentimen', 'tokenizer.pkl')
 LEXICON_POSITIVE_PATH = os.path.join(BASE_DIR, 'Models', 'sentimen', 'lexicon_positive.json')
 LEXICON_NEGATIVE_PATH = os.path.join(BASE_DIR, 'Models', 'sentimen', 'lexicon_negative.json')
 SLANGWORDS_PATH = os.path.join(BASE_DIR, 'Models', 'sentimen', 'combined_slang_words.txt')
-STOPWORDS_PATH = os.path.join(BASE_DIR, 'Models', 'sentimen', 'combined_stop_words.txt') # Stopwords untuk preprocessing sentimen dan search
+STOPWORDS_PATH = os.path.join(BASE_DIR, 'Models', 'sentimen', 'combined_stop_words.txt')
 
 # Search/Content-Based Filtering Models Paths
-# TFIDF_VECTORIZER_PATH dan TFIDF_MATRIX_PATH tidak digunakan karena di-fit saat runtime
-CBR_DATA_PATH = os.path.join(BASE_DIR, 'Models', 'search', 'cbr_clean.csv') # Data pantai utama untuk TF-IDF dan rekomendasi populer
+CBR_DATA_PATH = os.path.join(BASE_DIR, 'Models', 'search', 'cbr_clean.csv')
 
 # NEW: Hybrid Recommender Model Paths
 HYBRID_RECOMMENDER_MODEL_PATH = os.path.join(BASE_DIR, 'Models', 'recommend', 'hybrid_recommender_model.h5')
 PLACE_ENCODER_PATH = os.path.join(BASE_DIR, 'Models', 'recommend', 'place_encoder.pkl')
 USER_ENCODER_PATH = os.path.join(BASE_DIR, 'Models', 'recommend', 'user_encoder.pkl')
+
+# --- Google Drive File IDs ---
+# Ganti ID di bawah ini dengan ID file yang benar dari Google Drive Anda
+GDRIVE_FILE_IDS = {
+    'hybrid_recommender_model.h5': '1zN0Q8iXH6si-lI_HuRt2Vrfoiq__kRPf',
+    'place_encoder.pkl': '1zN0Q8iXH6si-lI_HuRt2Vrfoiq__kRPf', # Ganti dengan ID yang benar
+    'user_encoder.pkl': '1zN0Q8iXH6si-lI_HuRt2Vrfoiq__kRPf' # Ganti dengan ID yang benar
+}
 
 # --- Global Variables for ML Assets ---
 sentiment_model = None
@@ -53,7 +59,7 @@ stemmer = None
 # For Search/Content-Based Filtering
 tfidf_vectorizer = None
 tfidf_matrix = None
-beach_data_for_search = None # Data dari cbr_clean.csv, digunakan untuk search dan rekomendasi populer/general
+beach_data_for_search = None
 
 # For Hybrid Recommender
 hybrid_recommender_model = None
@@ -61,14 +67,52 @@ place_encoder = None
 user_encoder = None
 encoded_place_to_original_id_map = {}
 
-
 # Preprocessing assets that are loaded/initialized globally
-stopword_remover = None # Initialize to None, loaded in try block
+stopword_remover = None
 slangwords = {}
 all_stopwords = set()
 
 # --- Maximum Sequence Length for Padding (sesuaikan dengan model sentimen Anda) ---
-MAX_SEQUENCE_LENGTH = 10 # Contoh: 10, harus sesuai dengan training model LSTM Anda
+MAX_SEQUENCE_LENGTH = 10
+
+# --- Fungsi untuk Mendownload File dari Google Drive ---
+def download_file_from_gdrive(file_id, destination):
+    """
+    Downloads a file from Google Drive using its file ID.
+    Handles large files by bypassing the virus scan warning.
+    """
+    URL = "https://docs.google.com/uc?export=download"
+    session = requests.Session()
+    
+    logging.info(f"Downloading file ID {file_id} to {destination}...")
+
+    try:
+        response = session.get(URL, params={'id': file_id}, stream=True)
+        token = None
+        for key, value in response.cookies.items():
+            if key.startswith('download_warning'):
+                token = value
+                break
+
+        if token:
+            params = {'id': file_id, 'confirm': token}
+            response = session.get(URL, params=params, stream=True)
+
+        if response.status_code == 200:
+            os.makedirs(os.path.dirname(destination), exist_ok=True)
+            with open(destination, "wb") as f:
+                for chunk in response.iter_content(32768):
+                    if chunk:
+                        f.write(chunk)
+            logging.info(f"File downloaded successfully to {destination}")
+            return True
+        else:
+            logging.error(f"Failed to download file. Status Code: {response.status_code}")
+            return False
+            
+    except Exception as e:
+        logging.critical(f"Error during file download from GDrive: {e}", exc_info=True)
+        return False
 
 # --- Fungsi untuk Memuat Aset ML ---
 def load_ml_assets():
@@ -79,7 +123,7 @@ def load_ml_assets():
 
     logging.info("Starting to load ML assets...")
     try:
-        # 1. Load Sentiment Models
+        # 1. Load Sentiment Models (as they are small and can be in Git)
         logging.info(f"Loading sentiment model from: {SENTIMENT_MODEL_PATH}")
         sentiment_model = tf.keras.models.load_model(SENTIMENT_MODEL_PATH)
         logging.info("Sentiment model loaded successfully.")
@@ -109,7 +153,19 @@ def load_ml_assets():
         stopword_remover = StopWordRemoverFactory().create_stop_word_remover()
         logging.info("Sastrawi StopWordRemover initialized.")
 
-        # 3. Load Hybrid Recommender Model and Encoders
+        # 3. Load Hybrid Recommender Model and Encoders by first downloading them
+        logging.info("Checking for hybrid recommender models...")
+        # Check if the model file exists, if not, download it
+        if not os.path.exists(HYBRID_RECOMMENDER_MODEL_PATH):
+            download_file_from_gdrive(GDRIVE_FILE_IDS['hybrid_recommender_model.h5'], HYBRID_RECOMMENDER_MODEL_PATH)
+        
+        if not os.path.exists(PLACE_ENCODER_PATH):
+            download_file_from_gdrive(GDRIVE_FILE_IDS['place_encoder.pkl'], PLACE_ENCODER_PATH)
+
+        if not os.path.exists(USER_ENCODER_PATH):
+            download_file_from_gdrive(GDRIVE_FILE_IDS['user_encoder.pkl'], USER_ENCODER_PATH)
+        
+        # Now try to load the models, will fail if download failed
         logging.info(f"Loading Hybrid Recommender Model from: {HYBRID_RECOMMENDER_MODEL_PATH}")
         hybrid_recommender_model = tf.keras.models.load_model(HYBRID_RECOMMENDER_MODEL_PATH)
         logging.info("Hybrid Recommender Model loaded successfully.")
@@ -151,66 +207,7 @@ def load_ml_assets():
         user_encoder = None
     logging.info("Finished loading ML assets.")
 
-# --- Fungsi Preprocessing ---
-def load_slangwords(file_path):
-    slangwords_dict = {}
-    try:
-        with open(file_path, 'r', encoding='utf-8') as file:
-            if file_path.endswith('.json'):
-                slangwords_dict = json.load(file)
-            else: # Assume text file with 'slang:replacement' per line
-                for line in file:
-                    if ':' in line:
-                        key, value = line.split(':', 1)
-                        slangwords_dict[key.strip()] = value.strip()
-        logging.info(f"Slangwords loaded from: {file_path}")
-    except Exception as e:
-        logging.error(f"Error loading slangwords from {file_path}: {e}")
-    return slangwords_dict
-
-def load_stopwords(file_path):
-    stopwords_set = set()
-    try:
-        with open(file_path, 'r', encoding='utf-8') as file:
-            for line in file:
-                stopwords_set.add(line.strip())
-        logging.info(f"Stopwords loaded from: {file_path}")
-    except Exception as e:
-        logging.error(f"Error loading stopwords from {file_path}: {e}")
-    return stopwords_set
-
-# --- Panggil load_ml_assets() saat startup ---
-# This must be called before trying to use any of the loaded models/assets.
-load_ml_assets()
-
-# --- Load Preprocessing Assets (Slangwords & Stopwords) dan Fit TF-IDF Vectorizer (hanya sekali saat startup) ---
-# Ini dilakukan setelah load_ml_assets() agar tfidf_vectorizer dan beach_data_for_search terisi.
-try:
-    slangwords = load_slangwords(SLANGWORDS_PATH)
-    indonesia_stopwords_set = load_stopwords(STOPWORDS_PATH)
-    english_stopwords_list = ["the", "a", "an", "is", "of", "and", "to", "in", "for", "with", "on"]
-    custom_stopwords_list = ["iya", "yaa", "gak", "nya", "na", "sih", "ku", "di", "ga", "ya", "gaa", "loh", "kah", "woi", "woii", "woy", "banget", "oke"]
-    all_stopwords = set(list(indonesia_stopwords_set) + english_stopwords_list + custom_stopwords_list)
-    logging.info("All stopwords combined.")
-
-    df = pd.read_csv(CBR_DATA_PATH)
-    # Gunakan fillna("") untuk memastikan tidak ada NaN di combined_text sebelum TF-IDF
-    texts_for_tfidf = df["combined_text"].fillna("").tolist()
-
-    tfidf_vectorizer = TfidfVectorizer()
-    tfidf_matrix = tfidf_vectorizer.fit_transform(texts_for_tfidf)
-    logging.info("TF-IDF Vectorizer fitted and TF-IDF Matrix created.")
-
-    # Convert DataFrame to list of dictionaries for easier JSON serialization
-    beach_data_for_search = df.to_dict(orient="records")
-    logging.info("Beach data for search loaded and converted to list of dicts.")
-
-except Exception as e:
-    logging.critical(f"FATAL ERROR: Error initializing TF-IDF and beach data: {e}", exc_info=True)
-    tfidf_vectorizer = None
-    tfidf_matrix = None
-    beach_data_for_search = None
-
+# ... (sisa kode lainnya tetap sama) ...
 
 def cleaning_text(text):
     if not isinstance(text, str): # Ensure text is a string
@@ -377,12 +374,12 @@ def search_point():
             if 0 <= i < len(beach_data_for_search):
                 beach_info = beach_data_for_search[i]
                 recommendations.append({
-                    "placeId": beach_info['place_id'], # Ensure 'place_id' matches your CSV column name
+                    "placeId": beach_info['place_id'],
                     "place_name": beach_info.get('place_name', 'N/A'),
                     "description": beach_info.get('description', 'No description available'),
-                    "rating": beach_info.get('rating', 0), # Use 0 as default if rating is missing
+                    "rating": beach_info.get('rating', 0),
                     "featured_image": beach_info.get('featured_image', 'N/A'),
-                    "similarity_score": float(cosine_sim[i]) # Convert to standard float
+                    "similarity_score": float(cosine_sim[i])
                 })
         logging.info(f"Found {len(recommendations)} recommendations for query '{user_input[:50]}...'")
         return jsonify({"recommendations": recommendations})
@@ -395,14 +392,14 @@ def search_point():
 @app.route('/recommend-beach', methods=['POST'])
 def recommend_beach():
     request_data = request.get_json()
-    user_id_from_node = request_data.get('user_id') # User ID (string) dari Node.js
-    preference_text = request_data.get('preference_text') # Preferensi eksplisit dari Node.js
+    user_id_from_node = request_data.get('user_id')
+    preference_text = request_data.get('preference_text')
     top_n = request_data.get('top_n', 10)
 
     # --- Skenario 1: Rekomendasi Terpersonalisasi (User Login & Model Tersedia) ---
     if user_id_from_node and hybrid_recommender_model and user_encoder and place_encoder and beach_data_for_search:
         try:
-            user_id_for_encoder = str(user_id_from_node).strip() # Ensure it's a string and strip whitespace
+            user_id_for_encoder = str(user_id_from_node).strip()
             
             if user_id_for_encoder not in user_encoder.classes_:
                 logging.warning(f"User ID '{user_id_for_encoder}' not found in user_encoder. Falling back to general recommendation.")
@@ -522,6 +519,38 @@ def _get_popular_beaches_from_data(top_n):
     else:
         logging.error("No beach data available for popular recommendations. Returning empty list.")
         return jsonify({"recommendations": []})
+
+# --- Panggil load_ml_assets() saat startup ---
+# This must be called before trying to use any of the loaded models/assets.
+load_ml_assets()
+
+# --- Load Preprocessing Assets (Slangwords & Stopwords) dan Fit TF-IDF Vectorizer (hanya sekali saat startup) ---
+# Ini dilakukan setelah load_ml_assets() agar tfidf_vectorizer dan beach_data_for_search terisi.
+try:
+    slangwords = load_slangwords(SLANGWORDS_PATH)
+    indonesia_stopwords_set = load_stopwords(STOPWORDS_PATH)
+    english_stopwords_list = ["the", "a", "an", "is", "of", "and", "to", "in", "for", "with", "on"]
+    custom_stopwords_list = ["iya", "yaa", "gak", "nya", "na", "sih", "ku", "di", "ga", "ya", "gaa", "loh", "kah", "woi", "woii", "woy", "banget", "oke"]
+    all_stopwords = set(list(indonesia_stopwords_set) + english_stopwords_list + custom_stopwords_list)
+    logging.info("All stopwords combined.")
+
+    df = pd.read_csv(CBR_DATA_PATH)
+    # Gunakan fillna("") untuk memastikan tidak ada NaN di combined_text sebelum TF-IDF
+    texts_for_tfidf = df["combined_text"].fillna("").tolist()
+
+    tfidf_vectorizer = TfidfVectorizer()
+    tfidf_matrix = tfidf_vectorizer.fit_transform(texts_for_tfidf)
+    logging.info("TF-IDF Vectorizer fitted and TF-IDF Matrix created.")
+
+    # Convert DataFrame to list of dictionaries for easier JSON serialization
+    beach_data_for_search = df.to_dict(orient="records")
+    logging.info("Beach data for search loaded and converted to list of dicts.")
+
+except Exception as e:
+    logging.critical(f"FATAL ERROR: Error initializing TF-IDF and beach data: {e}", exc_info=True)
+    tfidf_vectorizer = None
+    tfidf_matrix = None
+    beach_data_for_search = None
 
 
 if __name__ == '__main__':
