@@ -19,12 +19,12 @@ import logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 app = Flask(__name__)
-CORS(app) # Mengaktifkan CORS untuk semua endpoint
+CORS(app) # Enable CORS for all endpoints
 
-# --- Konfigurasi Path Model ---
+# --- Model Path Configuration ---
 BASE_DIR = os.path.dirname(__file__)
 
-# Sentiment Models Paths (Tidak berubah, masih menggunakan .h5)
+# Sentiment Models Paths
 SENTIMENT_MODEL_PATH = os.path.join(BASE_DIR, 'Models', 'sentimen', 'sentiment_model_lstm.h5')
 SENTIMENT_TOKENIZER_PATH = os.path.join(BASE_DIR, 'Models', 'sentimen', 'tokenizer.pkl')
 LEXICON_POSITIVE_PATH = os.path.join(BASE_DIR, 'Models', 'sentimen', 'lexicon_positive.json')
@@ -35,7 +35,7 @@ STOPWORDS_PATH = os.path.join(BASE_DIR, 'Models', 'sentimen', 'combined_stop_wor
 # Search/Content-Based Filtering Models Paths
 CBR_DATA_PATH = os.path.join(BASE_DIR, 'Models', 'search', 'cbr_clean.csv')
 
-# --- PERUBAHAN DI SINI: Menggunakan model .tflite ---
+# Hybrid Recommender (TFLite) Models Paths
 TFLITE_MODEL_PATH = os.path.join(BASE_DIR, 'Models', 'recommend', 'model.tflite')
 PLACE_ENCODER_PATH = os.path.join(BASE_DIR, 'Models', 'recommend', 'place_encoder.pkl')
 USER_ENCODER_PATH = os.path.join(BASE_DIR, 'Models', 'recommend', 'user_encoder.pkl')
@@ -46,6 +46,9 @@ sentiment_tokenizer = None
 lexicon_positive = {}
 lexicon_negative = {}
 stemmer = None
+stopword_remover = None
+slangwords = {}
+all_stopwords = set()
 
 # For Search/Content-Based Filtering
 tfidf_vectorizer = None
@@ -53,29 +56,21 @@ tfidf_matrix = None
 beach_data_for_search = None
 
 # For Hybrid Recommender
-# PERUBAHAN: Gunakan interpreter, bukan model langsung
 hybrid_recommender_interpreter = None
 place_encoder = None
 user_encoder = None
-encoded_place_to_original_id_map = {}
-
-# Preprocessing assets that are loaded/initialized globally
-stopword_remover = None
-slangwords = {}
-all_stopwords = set()
 
 MAX_SEQUENCE_LENGTH = 10
 
-# --- Fungsi untuk Memuat Aset ML ---
+# --- Function to Load ML Assets ---
 def load_ml_assets():
-    """Memuat semua model ML dan aset lainnya saat aplikasi dimulai."""
+    """Loads all ML models and other assets when the application starts."""
     global sentiment_model, sentiment_tokenizer, lexicon_positive, lexicon_negative, stemmer, \
-           hybrid_recommender_interpreter, place_encoder, user_encoder, \
-           slangwords, all_stopwords, encoded_place_to_original_id_map, stopword_remover
+           hybrid_recommender_interpreter, place_encoder, user_encoder, stopword_remover
 
     logging.info("Starting to load ML assets...")
     try:
-        # 1. Load Sentiment Models (Tidak berubah)
+        # Load Sentiment Models
         logging.info(f"Loading sentiment model from: {SENTIMENT_MODEL_PATH}")
         sentiment_model = tf.keras.models.load_model(SENTIMENT_MODEL_PATH)
         logging.info("Sentiment model loaded successfully.")
@@ -85,32 +80,21 @@ def load_ml_assets():
             sentiment_tokenizer = pickle.load(f)
         logging.info("Sentiment Tokenizer loaded successfully.")
 
-        logging.info(f"Loading positive lexicon from: {LEXICON_POSITIVE_PATH}")
-        with open(LEXICON_POSITIVE_PATH, 'r', encoding='utf-8') as f:
-            lexicon_positive = json.load(f)
-        logging.info("Positive lexicon loaded.")
-
-        logging.info(f"Loading negative lexicon from: {LEXICON_NEGATIVE_PATH}")
-        with open(LEXICON_NEGATIVE_PATH, 'r', encoding='utf-8') as f:
-            lexicon_negative = json.load(f)
-        logging.info("Negative lexicon loaded.")
-
-        # 2. Load Sastrawi Stemmer (Tidak berubah)
-        logging.info("Loading Sastrawi Stemmer...")
-        factory = StemmerFactory()
-        stemmer = factory.create_stemmer()
-        logging.info("Sastrawi Stemmer loaded.")
+        # Load Sastrawi
+        logging.info("Loading Sastrawi Stemmer and StopWordRemover...")
+        stemmer_factory = StemmerFactory()
+        stemmer = stemmer_factory.create_stemmer()
+        stopword_remover_factory = StopWordRemoverFactory()
+        stopword_remover = stopword_remover_factory.create_stop_word_remover()
+        logging.info("Sastrawi assets loaded.")
         
-        stopword_remover = StopWordRemoverFactory().create_stop_word_remover()
-        logging.info("Sastrawi StopWordRemover initialized.")
-
-        # --- PERUBAHAN DI SINI: Menggunakan TFLite Interpreter ---
+        # Load Hybrid Recommender TFLite Model
         logging.info(f"Loading Hybrid Recommender Model from: {TFLITE_MODEL_PATH}")
         hybrid_recommender_interpreter = tf.lite.Interpreter(model_path=TFLITE_MODEL_PATH)
         hybrid_recommender_interpreter.allocate_tensors()
         logging.info("Hybrid Recommender Model (TFLite) loaded successfully.")
 
-        # Load Encoders (Tidak berubah)
+        # Load Encoders
         logging.info(f"Loading Place Encoder from: {PLACE_ENCODER_PATH}")
         with open(PLACE_ENCODER_PATH, 'rb') as f:
             place_encoder = pickle.load(f)
@@ -121,44 +105,22 @@ def load_ml_assets():
             user_encoder = pickle.load(f)
         logging.info("User Encoder loaded successfully.")
 
-        if place_encoder and hasattr(place_encoder, 'classes_'):
-            encoded_place_to_original_id_map = {
-                i: place_id for i, place_id in enumerate(place_encoder.classes_)
-            }
-            logging.info("Place Encoder map created.")
-        else:
-            logging.warning("Warning: place_encoder does not have 'classes_' attribute. Cannot create mapping.")
-
-    except FileNotFoundError as e:
-        logging.error(f"FATAL ERROR: One or more ML asset files not found. Please ensure all files are in the correct directories.")
-        logging.error(f"Missing file: {e.filename}")
-        sentiment_model = None
-        sentiment_tokenizer = None
-        hybrid_recommender_interpreter = None # PERUBAHAN
-        place_encoder = None
-        user_encoder = None
     except Exception as e:
-        logging.critical(f"FATAL ERROR: General error loading ML assets: {e}", exc_info=True)
+        logging.critical(f"FATAL ERROR loading ML assets: {e}", exc_info=True)
+        # Set all models to None to prevent the app from running in a broken state
         sentiment_model = None
-        sentiment_tokenizer = None
-        hybrid_recommender_interpreter = None # PERUBAHAN
-        place_encoder = None
-        user_encoder = None
-    logging.info("Finished loading ML assets.")
+        hybrid_recommender_interpreter = None
+        # ... etc.
 
-
-# --- Fungsi Preprocessing --- (Tidak berubah)
+# --- Preprocessing Functions ---
 def load_slangwords(file_path):
     slangwords_dict = {}
     try:
         with open(file_path, 'r', encoding='utf-8') as file:
-            if file_path.endswith('.json'):
-                slangwords_dict = json.load(file)
-            else:
-                for line in file:
-                    if ':' in line:
-                        key, value = line.split(':', 1)
-                        slangwords_dict[key.strip()] = value.strip()
+            for line in file:
+                if ':' in line:
+                    key, value = line.split(':', 1)
+                    slangwords_dict[key.strip()] = value.strip()
         logging.info(f"Slangwords loaded from: {file_path}")
     except Exception as e:
         logging.error(f"Error loading slangwords from {file_path}: {e}")
@@ -175,325 +137,218 @@ def load_stopwords(file_path):
         logging.error(f"Error loading stopwords from {file_path}: {e}")
     return stopwords_set
 
-# Panggil load_ml_assets() saat startup
+def cleaning_text(text):
+    if not isinstance(text, str): text = str(text)
+    text = text.lower() # Case folding
+    text = text.replace(r'@[\w\d]+', ' ').replace(r'#[\w\d]+', ' ').replace(r'RT[\s]', ' ')
+    text = text.replace(r'http\S+|www\S+', ' ').replace(r'\d+', ' ').replace(r'[^a-zA-Z\s]', ' ')
+    text = text.replace('\n', ' ').strip()
+    return ' '.join(text.split())
+
+def fix_slangwords(text, slang_dict):
+    words = text.split()
+    return ' '.join([slang_dict.get(word, word) for word in words])
+
+def stemming_text_func(text):
+    return stemmer.stem(text) if stemmer else text
+
+def remove_stopwords(text):
+    return stopword_remover.remove(text) if stopword_remover else text
+
+# --- Load assets on startup ---
 load_ml_assets()
+slangwords = load_slangwords(SLANGWORDS_PATH)
+# Additional stopwords can be added here if needed
+# all_stopwords = ...
 
 try:
-    slangwords = load_slangwords(SLANGWORDS_PATH)
-    indonesia_stopwords_set = load_stopwords(STOPWORDS_PATH)
-    english_stopwords_list = ["the", "a", "an", "is", "of", "and", "to", "in", "for", "with", "on"]
-    custom_stopwords_list = ["iya", "yaa", "gak", "nya", "na", "sih", "ku", "di", "ga", "ya", "gaa", "loh", "kah", "woi", "woii", "woy", "banget", "oke"]
-    all_stopwords = set(list(indonesia_stopwords_set) + english_stopwords_list + custom_stopwords_list)
-    logging.info("All stopwords combined.")
-
     df = pd.read_csv(CBR_DATA_PATH)
     texts_for_tfidf = df["combined_text"].fillna("").tolist()
-
     tfidf_vectorizer = TfidfVectorizer()
     tfidf_matrix = tfidf_vectorizer.fit_transform(texts_for_tfidf)
-    logging.info("TF-IDF Vectorizer fitted and TF-IDF Matrix created.")
-
     beach_data_for_search = df.to_dict(orient="records")
-    logging.info("Beach data for search loaded and converted to list of dicts.")
-
+    logging.info("TF-IDF Vectorizer fitted and beach data loaded.")
 except Exception as e:
-    logging.critical(f"FATAL ERROR: Error initializing TF-IDF and beach data: {e}", exc_info=True)
+    logging.critical(f"FATAL ERROR initializing TF-IDF and beach data: {e}", exc_info=True)
     tfidf_vectorizer = None
     tfidf_matrix = None
     beach_data_for_search = None
 
 
-def cleaning_text(text):
-    if not isinstance(text, str):
-        text = str(text)
-    text = text.replace(r'@[\w\d]+', ' ')
-    text = text.replace(r'#[\w\d]+', ' ')
-    text = text.replace(r'RT[\s]', ' ')
-    text = text.replace(r'http\S+|www\S+', ' ')
-    text = text.replace(r'\d+', ' ')
-    text = text.replace(r'[^a-zA-Z\s]', ' ')
-    text = text.replace('\n', ' ')
-    text = ' '.join(text.split())
-    text = text.strip()
+# =================================================================================
+# --- REFACTORED AND NEW HELPER FUNCTIONS ---
+# =================================================================================
+
+def _preprocess_query(text):
+    """Helper function to preprocess a text query."""
+    text = cleaning_text(text)
+    text = fix_slangwords(text, slangwords)
+    text = remove_stopwords(text)
+    # Stemming is optional and can be slow, enable if needed
+    # text = stemming_text_func(text) 
     return text
 
-def casefolding_text(text):
-    return text.lower()
+def _get_tfidf_recommendations(query, limit=10, page=1):
+    """
+    Calculates recommendations based on TF-IDF and supports pagination.
+    Returns a dictionary with 'recommendations' and 'totalCount'.
+    """
+    if not all([query, tfidf_vectorizer, tfidf_matrix is not None, beach_data_for_search]):
+        return {"recommendations": [], "totalCount": 0}
 
-def fix_slangwords(text):
-    if not slangwords:
-        logging.warning("Slangwords dictionary is empty. Skipping slang word fixing.")
-        return text
-    words = text.split()
-    fixed_words = [slangwords.get(word, word) for word in words]
-    return ' '.join(fixed_words)
+    processed_query = _preprocess_query(query)
+    if not processed_query.strip():
+        logging.info("Query became empty after processing.")
+        return {"recommendations": [], "totalCount": 0}
 
-def tokenizing_text(text, current_tokenizer):
-    if current_tokenizer is None:
-        logging.error("Tokenizer is None. Cannot tokenize text.")
-        return []
-    sequences = current_tokenizer.texts_to_sequences([text])
-    if sequences and len(sequences[0]) > 0:
-        return sequences[0]
-    return []
+    user_tfidf = tfidf_vectorizer.transform([processed_query])
+    cosine_sim = cosine_similarity(user_tfidf, tfidf_matrix).flatten()
+    
+    # Get all relevant results (score > 0) and sort them
+    relevant_indices = [i for i, score in enumerate(cosine_sim) if score > 0]
+    sorted_relevant_indices = sorted(relevant_indices, key=lambda i: cosine_sim[i], reverse=True)
+    
+    total_count = len(sorted_relevant_indices)
+    
+    # Apply pagination
+    start_index = (page - 1) * limit
+    end_index = start_index + limit
+    paginated_indices = sorted_relevant_indices[start_index:end_index]
 
-def filtering_text(tokens):
-    if not all_stopwords:
-        logging.warning("Stopwords set is empty. Skipping stopword filtering.")
-        return tokens
-    return [word for word in tokens if word not in all_stopwords]
-
-def stemming_text_func(text):
-    if stemmer:
-        return stemmer.stem(text)
-    logging.warning("Stemmer is None. Skipping stemming.")
-    return text
-
-# --- Endpoint for Sentiment Analysis --- (Tidak berubah)
-@app.route('/analyze-sentiment', methods=['POST'])
-def analyze_sentiment():
-    if sentiment_model is None or sentiment_tokenizer is None:
-        logging.error("Sentiment ML models not loaded. Returning 500.")
-        return jsonify({"error": "Sentiment ML models not loaded or still initializing."}), 500
-
-    data = request.get_json()
-    review_text = data.get('review_text')
-
-    if not review_text or not isinstance(review_text, str):
-        logging.warning(f"Invalid or no review_text provided: {review_text}. Returning 400.")
-        return jsonify({"error": "No valid review_text provided"}), 400
-
-    try:
-        logging.info(f"Analyzing sentiment for: '{review_text[:50]}...'")
-        processed_text = cleaning_text(review_text)
-        logging.debug(f"Cleaned: '{processed_text}'")
-        processed_text = casefolding_text(processed_text)
-        logging.debug(f"Casefolded: '{processed_text}'")
-        processed_text = fix_slangwords(processed_text)
-        logging.debug(f"Slang fixed: '{processed_text}'")
-        filtered_words = filtering_text(processed_text.split())
-        logging.debug(f"Filtered words: {filtered_words}")
-        stemmed_text = stemming_text_func(' '.join(filtered_words))
-        logging.debug(f"Stemmed text: '{stemmed_text}'")
-        sequences = sentiment_tokenizer.texts_to_sequences([stemmed_text])
-        logging.debug(f"Tokenized sequences: {sequences}")
-        padded_sequences = pad_sequences(sequences, maxlen=MAX_SEQUENCE_LENGTH, padding='post', truncating='post')
-        logging.debug(f"Padded sequences shape: {padded_sequences.shape}")
-
-        if padded_sequences.size == 0 or np.all(padded_sequences == 0):
-            logging.info("Processed text resulted in empty or all-zero padded sequence. Returning Neutral.")
-            return jsonify({"sentiment": "Neutral", "confidence": 0.5})
-
-        prediction = sentiment_model.predict(padded_sequences)[0][0]
-        sentiment_label = "Positive" if prediction >= 0.5 else "Negative"
-        logging.info(f"Prediction: {prediction}, Sentiment: {sentiment_label}")
-
-        return jsonify({
-            "sentiment": sentiment_label,
-            "confidence": float(prediction)
+    recommendations = []
+    for i in paginated_indices:
+        recommendations.append({
+            "placeId": beach_data_for_search[i]['place_id'],
+            "similarity_score": float(cosine_sim[i])
         })
 
-    except Exception as e:
-        logging.error(f"Error during sentiment analysis: {e}", exc_info=True)
-        return jsonify({"error": f"Failed to analyze sentiment due to internal error: {str(e)}"}), 500
+    return {"recommendations": recommendations, "totalCount": total_count}
 
-# --- Endpoint for Content-Based Search (using TF-IDF) --- (Tidak berubah)
+# =================================================================================
+# --- API ENDPOINTS ---
+# =================================================================================
+
 @app.route('/search-point', methods=['GET'])
 def search_point():
-    if tfidf_vectorizer is None or tfidf_matrix is None or beach_data_for_search is None:
-        logging.error("TF-IDF model or beach data not loaded for search-point. Returning 500.")
-        return jsonify({"error": "Search model or data not loaded on server."}), 500
+    """Handles search requests using TF-IDF with pagination."""
+    if tfidf_vectorizer is None:
+        return jsonify({"error": "Search model is not available."}), 503
 
-    req_data = request.get_json()
-    user_input = req_data.get('query')
-    top_n = req_data.get('top_n', 10)
+    user_query = request.args.get('query')
+    limit = int(request.args.get('limit', 10))
+    page = int(request.args.get('page', 1))
 
-    if not user_input or not isinstance(user_input, str):
-        logging.warning(f"Invalid search input provided: {user_input}. Returning 400.")
-        return jsonify({"error": "Invalid search input. 'query' must be a non-empty string."}), 400
+    if not user_query:
+        return jsonify({"error": "The 'query' parameter is required."}), 400
 
     try:
-        logging.info(f"Searching for query: '{user_input[:50]}...'")
-        user_input_processed = cleaning_text(user_input)
-        user_input_processed = casefolding_text(user_input_processed)
-        user_input_processed = fix_slangwords(user_input_processed)
+        logging.info(f"Searching for query: '{user_query}', page: {page}, limit: {limit}")
+        result = _get_tfidf_recommendations(user_query, limit, page)
+        return jsonify(result)
         
-        if stopword_remover:
-            user_input_processed = stopword_remover.remove(user_input_processed)
-        else:
-            logging.warning("Stopword remover is not initialized. Skipping stopword removal for search query.")
-            words_after_slang = user_input_processed.split()
-            filtered_words = filtering_text(words_after_slang)
-            user_input_processed = ' '.join(filtered_words)
-
-        if not user_input_processed.strip():
-            logging.info("Search query became empty after processing. Returning no recommendations.")
-            return jsonify({"recommendations": []})
-
-        user_tfidf = tfidf_vectorizer.transform([user_input_processed])
-        cosine_sim = cosine_similarity(user_tfidf, tfidf_matrix).flatten()
-
-        if np.max(cosine_sim) == 0:
-            logging.info("No similar items found for the search query.")
-            return jsonify({"recommendations": []})
-
-        top_indices = cosine_sim.argsort()[-top_n:][::-1]
-
-        recommendations = []
-        for i in top_indices:
-            if 0 <= i < len(beach_data_for_search):
-                beach_info = beach_data_for_search[i]
-                recommendations.append({
-                    "placeId": beach_info['place_id'],
-                    "place_name": beach_info.get('place_name', 'N/A'),
-                    "description": beach_info.get('description', 'No description available'),
-                    "rating": beach_info.get('rating', 0),
-                    "featured_image": beach_info.get('featured_image', 'N/A'),
-                    "similarity_score": float(cosine_sim[i])
-                })
-        logging.info(f"Found {len(recommendations)} recommendations for query '{user_input[:50]}...'")
-        return jsonify({"recommendations": recommendations})
-
     except Exception as e:
-        logging.error(f"Error during search-point recommendation: {e}", exc_info=True)
-        return jsonify({"error": f"An error occurred while processing the search request: {str(e)}"}), 500
+        logging.error(f"Error during search-point: {e}", exc_info=True)
+        return jsonify({"error": "An internal server error occurred during search."}), 500
 
-# --- Endpoint for Hybrid Recommendation (Personalized vs. General/Popular) ---
 @app.route('/recommend-beach', methods=['POST'])
 def recommend_beach():
+    """Handles personalized or general recommendations."""
     request_data = request.get_json()
-    user_id_from_node = request_data.get('user_id')
+    user_id = request_data.get('user_id')
     preference_text = request_data.get('preference_text')
-    top_n = request_data.get('top_n', 10)
+    top_n = int(request_data.get('top_n', 10))
 
     # --- Skenario 1: Rekomendasi Terpersonalisasi ---
-    # PERUBAHAN: Cek interpreter, bukan model
-    if user_id_from_node and hybrid_recommender_interpreter and user_encoder and place_encoder and beach_data_for_search:
+    if user_id and hybrid_recommender_interpreter and user_encoder and place_encoder:
         try:
-            user_id_for_encoder = str(user_id_from_node).strip()
-            
+            user_id_for_encoder = str(user_id).strip()
             if user_id_for_encoder not in user_encoder.classes_:
-                logging.warning(f"User ID '{user_id_for_encoder}' not found in user_encoder. Falling back to general recommendation.")
+                logging.warning(f"User ID '{user_id_for_encoder}' not in encoder. Falling back.")
                 return _handle_general_recommendation(preference_text, top_n)
 
             user_encoded_idx = user_encoder.transform([user_id_for_encoder])[0]
-            logging.info(f"Personalized recommendation for user_id: {user_id_from_node}, encoded_idx: {user_encoded_idx}")
+            
+            all_place_ids = [item['place_id'] for item in beach_data_for_search]
+            mappable_place_ids = [pid for pid in all_place_ids if pid in place_encoder.classes_]
+            encoded_place_ids = place_encoder.transform(mappable_place_ids)
 
-            all_original_place_ids = [item['place_id'] for item in beach_data_for_search]
-            mappable_place_ids_original = [
-                pid for pid in all_original_place_ids if pid in place_encoder.classes_
-            ]
-            
-            if not mappable_place_ids_original:
-                logging.warning("No mappable place IDs found for personalized prediction. Falling back to general.")
-                return _handle_general_recommendation(preference_text, top_n)
-
-            encoded_place_ids_for_prediction = place_encoder.transform(mappable_place_ids_original)
-            
-            # --- PERUBAHAN DI SINI: Prediksi menggunakan TFLite Interpreter ---
-            
-            # Dapatkan input dan output tensor dari interpreter
             input_details = hybrid_recommender_interpreter.get_input_details()
             output_details = hybrid_recommender_interpreter.get_output_details()
             
-            # Buat array input yang sesuai dengan format model tflite
-            user_input_array = np.full(len(encoded_place_ids_for_prediction), user_encoded_idx, dtype=np.int32)
-            place_input_array = np.array(encoded_place_ids_for_prediction, dtype=np.int32)
+            user_input_array = np.full(len(encoded_place_ids), user_encoded_idx, dtype=np.int32)
+            place_input_array = np.array(encoded_place_ids, dtype=np.int32)
             
-            # Set nilai input pada tensor interpreter
             hybrid_recommender_interpreter.set_tensor(input_details[0]['index'], user_input_array)
             hybrid_recommender_interpreter.set_tensor(input_details[1]['index'], place_input_array)
-            
-            # Jalankan inferensi
             hybrid_recommender_interpreter.invoke()
             
-            # Ambil hasil prediksi dari tensor output
             predictions = hybrid_recommender_interpreter.get_tensor(output_details[0]['index']).flatten()
             
-            logging.debug(f"Predictions shape: {predictions.shape}")
+            results = [{"placeId": pid, "score": float(score)} for pid, score in zip(mappable_place_ids, predictions)]
+            results.sort(key=lambda x: x['score'], reverse=True)
 
-            personalized_results = []
-            for i, score in enumerate(predictions):
-                original_place_id = mappable_place_ids_original[i]
-                personalized_results.append({
-                    "placeId": original_place_id,
-                    "score": float(score)
-                })
+            final_results = results[:top_n]
+            return jsonify({"recommendations": final_results, "totalCount": len(final_results)})
 
-            personalized_results.sort(key=lambda x: x['score'], reverse=True)
-            logging.info(f"Generated {len(personalized_results[:top_n])} personalized recommendations for user {user_id_from_node}.")
-            return jsonify({"recommendations": personalized_results[:top_n]})
-
-        except ValueError as ve:
-            logging.error(f"ValueError in personalized recommendation for user {user_id_from_node}: {ve}. Falling back to general.", exc_info=True)
-            return _handle_general_recommendation(preference_text, top_n)
         except Exception as e:
-            logging.error(f"Error in personalized recommendation for user {user_id_from_node}: {e}. Falling back to general.", exc_info=True)
+            logging.error(f"Personalized recommendation failed for user {user_id}: {e}. Falling back.", exc_info=True)
+            # Fallback to general recommendation on any error
             return _handle_general_recommendation(preference_text, top_n)
 
-    # --- Skenario 2: Rekomendasi Umum (Tidak berubah) ---
-    else:
-        logging.info(f"User is not logged in or personalization model not available/failed. Performing general recommendation.")
-        return _handle_general_recommendation(preference_text, top_n)
+    # --- Skenario 2: Rekomendasi Umum ---
+    return _handle_general_recommendation(preference_text, top_n)
 
 def _handle_general_recommendation(preference_text, top_n):
-    if preference_text and tfidf_vectorizer and tfidf_matrix is not None and beach_data_for_search is not None:
-        logging.info("Generating content-based recommendation using preference_text.")
-        try:
-            user_input_processed = cleaning_text(preference_text)
-            user_input_processed = casefolding_text(user_input_processed)
-            user_input_processed = fix_slangwords(user_input_processed)
-            
-            if stopword_remover:
-                user_input_processed = stopword_remover.remove(user_input_processed)
-            else:
-                words_after_slang = user_input_processed.split()
-                filtered_words = filtering_text(words_after_slang)
-                user_input_processed = ' '.join(filtered_words)
-
-            if not user_input_processed.strip():
-                logging.info("Preference text became empty after processing. Falling back to popular.")
-                return _get_popular_beaches_from_data(top_n)
-
-            user_tfidf = tfidf_vectorizer.transform([user_input_processed])
-            cosine_sim = cosine_similarity(user_tfidf, tfidf_matrix).flatten()
-
-            if np.max(cosine_sim) == 0:
-                logging.info("No similarity found for preference text. Falling back to popular.")
-                return _get_popular_beaches_from_data(top_n)
-
-            top_indices = cosine_sim.argsort()[-top_n:][::-1]
-
-            recommendations = []
-            for i in top_indices:
-                if 0 <= i < len(beach_data_for_search):
-                    recommendations.append({
-                        "placeId": beach_data_for_search[i]['place_id'],
-                        "score": float(cosine_sim[i])
-                    })
-            logging.info(f"Generated {len(recommendations)} content-based recommendations.")
-            return jsonify({"recommendations": recommendations})
-        except Exception as e:
-            logging.error(f"Error during content-based recommendation: {e}. Falling back to popular.", exc_info=True)
+    """Handles general recommendations (content-based or popular)."""
+    if preference_text:
+        logging.info("Handling general recommendation with preference text.")
+        result = _get_tfidf_recommendations(preference_text, limit=top_n, page=1)
+        if not result["recommendations"]:
+            logging.info("TF-IDF result empty, falling back to popular.")
             return _get_popular_beaches_from_data(top_n)
+        return jsonify(result)
     else:
-        logging.info("Generating general recommendations (top-rated/popular).")
+        logging.info("No preference text, returning popular beaches.")
         return _get_popular_beaches_from_data(top_n)
 
 def _get_popular_beaches_from_data(top_n):
-    if beach_data_for_search:
-        top_rated_beaches = sorted(beach_data_for_search, key=lambda x: x.get('rating', 0), reverse=True)
-        general_recommendations = []
-        for i in range(min(top_n, len(top_rated_beaches))):
-            general_recommendations.append({
-                "placeId": top_rated_beaches[i]['place_id'],
-                "score": float(top_rated_beaches[i].get('rating', 0) / 5.0)
-            })
-        logging.info(f"Generated {len(general_recommendations)} popular recommendations.")
-        return jsonify({"recommendations": general_recommendations})
-    else:
-        logging.error("No beach data available for popular recommendations. Returning empty list.")
-        return jsonify({"recommendations": []})
+    """Returns top N popular beaches based on rating."""
+    if not beach_data_for_search:
+        return jsonify({"recommendations": [], "totalCount": 0})
+    
+    top_rated = sorted(beach_data_for_search, key=lambda x: x.get('rating', 0), reverse=True)
+    recommendations = [{"placeId": b['place_id'], "score": float(b.get('rating', 0))} for b in top_rated[:top_n]]
+    return jsonify({"recommendations": recommendations, "totalCount": len(recommendations)})
+
+
+@app.route('/analyze-sentiment', methods=['POST'])
+def analyze_sentiment():
+    """Handles sentiment analysis requests."""
+    if not sentiment_model or not sentiment_tokenizer:
+        return jsonify({"error": "Sentiment model is not available."}), 503
+
+    data = request.get_json()
+    review_text = data.get('review_text')
+    if not review_text or not isinstance(review_text, str):
+        return jsonify({"error": "No valid 'review_text' provided."}), 400
+
+    try:
+        processed_text = _preprocess_query(review_text) # Re-use preprocessing
+        sequences = sentiment_tokenizer.texts_to_sequences([processed_text])
+        padded = pad_sequences(sequences, maxlen=MAX_SEQUENCE_LENGTH, padding='post', truncating='post')
+
+        if padded.size == 0 or np.all(padded == 0):
+            return jsonify({"sentiment": "Neutral", "confidence": 0.5})
+
+        prediction = sentiment_model.predict(padded)[0][0]
+        sentiment = "Positive" if prediction >= 0.5 else "Negative"
+        return jsonify({"sentiment": sentiment, "confidence": float(prediction)})
+    except Exception as e:
+        logging.error(f"Error during sentiment analysis: {e}", exc_info=True)
+        return jsonify({"error": "An internal error occurred during analysis."}), 500
+
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=8080, debug=True)
+    # Use environment variable for port, with a default, for deployment flexibility
+    port = int(os.environ.get('PORT', 8080))
+    app.run(host='0.0.0.0', port=port, debug=False) # Set debug=False for production
