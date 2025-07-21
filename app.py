@@ -298,7 +298,7 @@ def analyze_sentiment():
         return jsonify({"error": f"Failed to analyze sentiment due to internal error: {str(e)}"}), 500
 
 # --- Endpoint for Content-Based Search (using TF-IDF) --- (Tidak berubah)
-@app.route('/search-point', methods=['GET '])
+@app.route('/search-point', methods=['GET'])
 def search_point():
     if tfidf_vectorizer is None or tfidf_matrix is None or beach_data_for_search is None:
         logging.error("TF-IDF model or beach data not loaded for search-point. Returning 500.")
