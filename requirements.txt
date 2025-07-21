@@ -3,6 +3,6 @@ tensorflow==2.18.0
 numpy==1.26.4
 pandas==2.2.2
 gunicorn==22.0.0
-scikit-learn==1.4.2
+scikit-learn==1.6.1
 Sastrawi==1.0.1
 Flask-Cors==3.0.10
